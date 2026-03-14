@@ -2,7 +2,7 @@
 
 ## Overview
 
-This agent is a Python CLI that connects to an LLM via an OpenAI-compatible API and returns structured JSON answers. It implements an **agentic loop** with tools (`read_file`, `list_files`) to explore the project wiki and find accurate answers.
+This agent is a Python CLI that connects to an LLM via an OpenAI-compatible API and returns structured JSON answers. It implements an **agentic loop** with three tools (`read_file`, `list_files`, `query_api`) to explore the project wiki, read source code, and query the backend API.
 
 ## LLM Provider
 
@@ -10,278 +10,103 @@ This agent is a Python CLI that connects to an LLM via an OpenAI-compatible API 
 
 **Model:** `qwen3-coder-plus`
 
-**Why Qwen Code:**
-- 1000 free requests per day
-- Available in Russia
-- No credit card required
-- OpenAI-compatible API with tool calling support
-
 ## Configuration
 
-The agent reads configuration from `.env.agent.secret` in the project root:
+The agent reads configuration from environment variables:
 
-```
-LLM_API_KEY=<your-api-key>
-LLM_API_BASE=http://<vm-ip>:<port>/v1
-LLM_MODEL=qwen3-coder-plus
-```
+| Variable | Purpose | Source |
+|----------|---------|--------|
+| `LLM_API_KEY` | LLM provider API key | `.env.agent.secret` or env |
+| `LLM_API_BASE` | LLM API endpoint URL | `.env.agent.secret` or env |
+| `LLM_MODEL` | Model name | `.env.agent.secret` or env |
+| `LMS_API_KEY` | Backend API key for query_api | `.env.docker.secret` or env |
+| `AGENT_API_BASE_URL` | Base URL for query_api | Environment (default: `http://localhost:42002`) |
+
+**Important:** The autochecker injects different values at runtime. Never hardcode these values.
 
 ## Architecture
 
-### Data Flow
-
-```
-┌─────────────┐     ┌──────────┐     ┌─────────────┐
-│  Command    │────▶│ agent.py │────▶│  LLM API    │
-│  Question   │     │  CLI     │     │  (Qwen)     │
-└─────────────┘     └──────────┘     └─────────────┘
-                         │                  │
-                         │◀──── Tool ───────│
-                         │    Calls         │
-                         ▼
-                  ┌─────────────┐
-                  │  Tools      │
-                  │  - read_file│
-                  │  - list_files│
-                  └─────────────┘
-                         │
-                         ▼
-                  ┌─────────────┐
-                  │  JSON       │
-                  │  Output     │
-                  └─────────────┘
-```
-
 ### Components
 
-1. **Environment Loader** (`load_env`)
-   - Parses `.env.agent.secret` file
-   - Simple KEY=value format (no external dependencies)
-
-2. **Configuration Manager** (`get_llm_config`)
-   - Validates that all required variables are present
-   - Exits with error if configuration is missing
-
-3. **Tools**
-   - `read_file(path)`: Read file contents from project repository
-   - `list_files(path)`: List directory contents
-   - Both tools enforce path security (no directory traversal)
-
-4. **LLM Client** (`call_llm`)
-   - Sends HTTP POST to `{api_base}/chat/completions`
-   - Uses `httpx` for HTTP requests
-   - 60-second timeout
-   - Includes tool definitions in request
-
-5. **Agentic Loop** (`run_agentic_loop`)
-   - Maintains conversation history
-   - Executes tool calls and feeds results back to LLM
-   - Maximum 10 tool calls per question
-   - Extracts answer and source from final response
-
-6. **CLI Entry Point** (`main`)
-   - Parses command-line argument (the question)
-   - Orchestrates the flow
-   - Outputs JSON to stdout
-   - All debug output to stderr
+1. **Environment Loader** - Parses `.env` files and environment variables
+2. **Tools:**
+   - `read_file(path)` - Read file contents from project repository
+   - `list_files(path)` - List directory contents
+   - `query_api(method, path, body, use_auth)` - Call backend API with optional auth
+3. **LLM Client** - Sends requests to LLM API with tool definitions
+4. **Agentic Loop** - Executes tool calls and feeds results back to LLM (max 20 calls)
+5. **CLI Entry Point** - Parses arguments, outputs JSON to stdout
 
 ## Tool Definitions
 
 ### `read_file`
-
-**Purpose:** Read the contents of a file from the project repository.
-
-**Schema:**
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "read_file",
-    "description": "Read the contents of a file from the project repository",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Relative path from project root"
-        }
-      },
-      "required": ["path"]
-    }
-  }
-}
-```
-
-**Security:**
-- Rejects paths containing `..`
-- Ensures resolved path is within project root
+Read file contents. Security: rejects paths with `..` or outside project root.
 
 ### `list_files`
+List directory contents. Security: same as read_file.
 
-**Purpose:** List files and directories at a given path.
-
-**Schema:**
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "list_files",
-    "description": "List files and directories at a given path",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Relative directory path from project root"
-        }
-      },
-      "required": ["path"]
-    }
-  }
-}
-```
-
-**Security:**
-- Rejects paths containing `..`
-- Ensures resolved path is within project root
+### `query_api`
+Call backend API with:
+- `method`: HTTP method (GET, POST, etc.)
+- `path`: API endpoint
+- `body`: Optional JSON body
+- `use_auth`: Whether to include LMS_API_KEY header (default: true)
 
 ## Agentic Loop
 
-The agentic loop implements the following logic:
-
-```python
+```
 1. Initialize messages = [system_prompt, user_question]
-2. Loop (max 10 iterations):
+2. Loop (max 20 iterations):
    a. Call LLM with messages + tool definitions
-   b. If LLM returns tool_calls:
-      - Execute each tool
-      - Append tool results as "tool" role messages
-      - Continue loop
-   c. If LLM returns text answer (no tool_calls):
-      - Extract answer and source
-      - Return JSON output
-      - Exit loop
-3. If max iterations reached, get final summary from LLM
+   b. If tool_calls: execute tools, append results, continue
+   c. If text answer: extract answer and source, return JSON
+3. If max iterations: get final summary from LLM
 ```
 
 ## System Prompt
 
-The system prompt instructs the LLM to:
+The system prompt guides the LLM to:
+- Use `list_files`/`read_file` for wiki questions
+- Use `read_file` for source code questions
+- Use `query_api` for data queries
+- Use `query_api` with `use_auth=false` for auth testing
+- Include source file paths in answers
 
-1. Use `list_files` to discover wiki files when unsure where to look
-2. Use `read_file` to read relevant files
-3. Always include a source reference in the final answer
-4. Format source as: `wiki/filename.md#section-anchor`
-
-```
-You are a helpful assistant with access to a project wiki.
-
-You have two tools:
-- list_files(path): List files in a directory
-- read_file(path): Read the contents of a file
-
-When answering questions about the project:
-1. First use list_files("wiki") to discover available documentation
-2. Use read_file() to read relevant files and find accurate information
-3. Include the source file path and section in your final answer
-4. Format source as: wiki/filename.md#section-anchor
-
-Think step-by-step and use your tools to find accurate answers from the wiki.
-```
-
-## API Request Format
+## Output Format
 
 ```json
-POST {api_base}/chat/completions
-Headers:
-  Authorization: Bearer {api_key}
-  Content-Type: application/json
-
-Body:
 {
-  "model": "qwen3-coder-plus",
-  "messages": [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "<question>"}
-  ],
-  "tools": [...],
-  "tool_choice": "auto"
-}
-```
-
-## Response Format
-
-**stdout** (single JSON line):
-```json
-{
-  "answer": "Edit the conflicting file, choose which changes to keep, then stage and commit.",
-  "source": "wiki/git-workflow.md#resolving-merge-conflicts",
+  "answer": "There are 44 items in the database.",
+  "source": "",
   "tool_calls": [
-    {
-      "tool": "list_files",
-      "args": {"path": "wiki"},
-      "result": "git-workflow.md\n..."
-    },
-    {
-      "tool": "read_file",
-      "args": {"path": "wiki/git-workflow.md"},
-      "result": "..."
-    }
+    {"tool": "query_api", "args": {"method": "GET", "path": "/items/"}, "result": "..."}
   ]
 }
 ```
 
-**stderr** (debug output):
-```
-Question: How do you resolve a merge conflict?
-Using model: qwen3-coder-plus
-
-[Loop iteration 1]
-[Executing tool: list_files({'path': 'wiki'})]
-
-[Loop iteration 2]
-[Executing tool: read_file({'path': 'wiki/git-workflow.md'})]
-
-[Loop iteration 3]
-[LLM provided final answer]
-
-Answer received
-Source: wiki/git-workflow.md#resolving-merge-conflict
-```
-
-## Usage
-
-```bash
-# Run with a question
-uv run agent.py "How do you resolve a merge conflict?"
-
-# Example output:
-# {"answer": "...", "source": "wiki/git-workflow.md#...", "tool_calls": [...]}
-```
-
-## Error Handling
-
-- **Missing configuration:** Exits with error message to stderr
-- **API timeout:** 60-second limit, exits on timeout
-- **Invalid API response:** Logs the response to stderr and exits
-- **No question provided:** Shows usage message
-- **Path traversal attempts:** Tools reject unsafe paths
-
 ## Testing
 
-Run the regression tests:
+Run tests: `uv run pytest test_agent.py -v`
 
-```bash
-uv run pytest test_agent.py -v
-```
+9 tests covering Task 1, 2, and 3 requirements.
 
-Tests verify:
-1. Agent produces valid JSON with required fields
-2. Correct tools are called for specific questions
-3. Source field contains expected file references
+## Benchmark Performance
 
-## Future Extensions (Task 3)
+**Score: 8/10 (80%)**
 
-- Add `query_api` tool for backend LMS queries
-- Expand system prompt for domain-specific knowledge
-- Improve source extraction with better section anchor detection
+Passing: Wiki questions, framework detection, API queries, bug diagnosis.
+Failing: Complex LLM judge questions (HTTP request journey, ETL idempotency).
+
+## Lessons Learned
+
+1. **Source extraction is critical** - Many questions require a `source` field. The `extract_source()` function uses regex patterns to find file references.
+
+2. **Tool descriptions matter** - Clear descriptions help the LLM choose the right tool. The `use_auth` parameter enables authentication testing.
+
+3. **Max tool calls tuning** - Started with 10, increased to 20 for complex questions.
+
+4. **System prompt iteration** - Evolved to explicitly guide tool selection and bug diagnosis workflow.
+
+5. **Environment variable flexibility** - Agent checks both files and environment for autochecker compatibility.
+
+6. **LLM judge questions** - Questions requiring multi-file analysis and complex reasoning are challenging. The agent needs better synthesis capabilities.
