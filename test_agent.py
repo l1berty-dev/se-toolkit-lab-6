@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Regression tests for agent.py (Task 1 and Task 2).
+"""Regression tests for agent.py (Task 1, Task 2, and Task 3).
 
 These tests run agent.py as a subprocess and verify:
 1. The output is valid JSON
 2. The 'answer' field is present
 3. The 'tool_calls' field is present and is an array
 4. For Task 2: tools are called correctly and source is provided
+5. For Task 3: query_api tool works for system questions
 
 Run with: uv run pytest test_agent.py -v
 """
@@ -168,3 +169,73 @@ class TestAgentTask2:
             assert isinstance(tc["result"], str), (
                 f"'result' should be a string, got: {type(tc['result'])}"
             )
+
+
+class TestAgentTask3:
+    """Regression tests for Task 3: The System Agent."""
+
+    def test_framework_question_uses_read_file(self):
+        """Test that agent uses read_file for framework question."""
+        question = "What framework does the backend use?"
+
+        data, stdout, stderr = run_agent(question)
+
+        # Check that tool_calls is not empty
+        assert len(data["tool_calls"]) > 0, (
+            f"Expected tool calls for framework question, got: {data['tool_calls']}"
+        )
+
+        # Check that read_file was used
+        tools_used = [tc["tool"] for tc in data["tool_calls"]]
+        assert "read_file" in tools_used, (
+            f"Expected 'read_file' in tool_calls, got: {tools_used}"
+        )
+
+        # Check that answer mentions FastAPI
+        answer_lower = data["answer"].lower()
+        assert "fastapi" in answer_lower, (
+            f"Expected 'FastAPI' in answer, got: {data['answer']}"
+        )
+
+    def test_items_count_uses_query_api(self):
+        """Test that agent uses query_api for items count question."""
+        question = "How many items are in the database?"
+
+        data, stdout, stderr = run_agent(question)
+
+        # Check that tool_calls is not empty
+        assert len(data["tool_calls"]) > 0, (
+            f"Expected tool calls for items count question, got: {data['tool_calls']}"
+        )
+
+        # Check that query_api was used
+        tools_used = [tc["tool"] for tc in data["tool_calls"]]
+        assert "query_api" in tools_used, (
+            f"Expected 'query_api' in tool_calls, got: {tools_used}"
+        )
+
+        # Check that answer contains a number
+        import re
+        numbers = re.findall(r'\d+', data["answer"])
+        assert len(numbers) > 0, (
+            f"Expected a number in answer, got: {data['answer']}"
+        )
+
+    def test_query_api_tool_has_required_fields(self):
+        """Test that query_api tool calls have required fields."""
+        question = "How many items are in the database?"
+
+        data, stdout, stderr = run_agent(question)
+
+        for tc in data["tool_calls"]:
+            if tc["tool"] == "query_api":
+                assert "tool" in tc, f"Missing 'tool' field in tool_call: {tc}"
+                assert "args" in tc, f"Missing 'args' field in tool_call: {tc}"
+                assert "result" in tc, f"Missing 'result' field in tool_call: {tc}"
+                # Check that args has method and path
+                assert "method" in tc["args"], (
+                    f"Missing 'method' in query_api args: {tc['args']}"
+                )
+                assert "path" in tc["args"], (
+                    f"Missing 'path' in query_api args: {tc['args']}"
+                )
